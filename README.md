@@ -1,17 +1,17 @@
 
-# CNNT Microscopy
+# MS-CNNT Microscopy
 
-Implementation of Convolutional Neural Network Transformer (CNNT) for microscopy.
+Implementation of Multi-scale Convolutional Neural Network Transformer (CNNT) for microscopy.
 
 A novel architecture that, together with backbone fine-tuning training scheme, pushes the State-Of-The-Art in microscopy image denoising and enhancement.
 
 For details, the pre-print paper is present here: https://arxiv.org/abs/2404.04726
 
-## Convolutional Neural Network Transformer
+## Multi-scale Convolutional Neural Network Transformer
 
-We propose a new network architecture for dynamic image processing. This architecture includes a novel network layer, the convolutional neural network transformer (CNNT), which takes the input tensor [B, T, C_in, H, W] and produces the output tensor [B, T, C_out, H, W]. 
+We propose a new network architecture for dynamic image processing. This architecture includes a novel network layer, the multi-scale convolutional neural network transformer (MS-CNNT), which takes the input tensor [B, T, C_in, H, W] and produces the output tensor [B, T, C_out, H, W]. 
 
-The key innovation is to design and implement a CNN attention layer. Compared to the conventional attention layer utilizing the linear layers, the CNN attention can take in large images with high spatial matrix size and avoids the explosion of number of parameters.
+The key innovation is to design and implement a multi-scale CNN attention layer. Compared to the conventional attention layer utilizing the linear layers, the MS-CNN attention can take in large images with high spatial matrix size and avoids the explosion of number of parameters.
 
 ## Repository overview
 
