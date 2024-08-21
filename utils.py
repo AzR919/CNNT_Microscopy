@@ -193,6 +193,7 @@ def normalize_image(image, percentiles=None, values=None, clip=True):
         i_max = values[1]
 
     n_img = (image - i_min)/(i_max - i_min)
+    #n_img = (image - image.max())/(image.max() - image.min())
 
     if clip:
         return torch.clip(n_img, 0, 1) if type(n_img)==torch.Tensor else np.clip(n_img, 0, 1)

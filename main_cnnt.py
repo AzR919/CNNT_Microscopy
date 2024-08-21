@@ -28,12 +28,11 @@ import torch
 from torch.utils.data.dataloader import DataLoader
 
 from models.LSUV import LSUVinit
-from models.enhancement_model import *
+from models.enhancement_model_cnnt import *
 from running_inference import *
 from data_utils import *
 from utils import *
 from models.fpn import *
-from models.emcad.networks import EMCADNet
 from ptflops import get_model_complexity_info
 from thop import profile
 
@@ -67,6 +66,7 @@ def arg_parser():
     parser.add_argument("--num_patches_per_train_sample", type=int, default=8, help='number of patches per train sample')
     parser.add_argument("--num_patches_per_val_sample", type=int, default=8, help='number of patches per val sample')
 
+
     # Training arguments
     parser.add_argument("--num_epochs", type=int, default=30, help='number of epochs to train for')
     parser.add_argument("--batch_size", type=int, default=8, help='size of batch to use')
@@ -96,8 +96,7 @@ def get_seg_loss(enhanced_image, seg, seg_criterion, device='cpu'):
     seg_input = enhanced_image.reshape((B*T, C, H, W)).to(device)
     if seg_input.size(1) == 1:
         seg_input = seg_input.repeat(1, 3, 1, 1)
-    seg_output = seg(seg_input)[-1].data.to(device)
-    #seg_output = seg(seg_input).to(device) # if fpn
+    seg_output = seg(seg_input).to(device)
 
     # build seg output
     target = (get_NoGT_target(seg_output)).data.to(device)
@@ -144,7 +143,6 @@ def train(model, config, train_set, val_set, test_set, val_set_larger, test_set_
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     #seg = fpn(2)
-    #seg = EMCADNet(num_classes=2)
     
     if config.dp:
         model = nn.DataParallel(model)
@@ -153,7 +151,7 @@ def train(model, config, train_set, val_set, test_set, val_set_larger, test_set_
     model.to(device)
     #seg.to(device)
 
-    seg_criterion = FocalLoss(gamma=2).to(device)
+    #seg_criterion = FocalLoss(gamma=2).to(device)
     
     wandb.watch(model)
 
@@ -230,7 +228,7 @@ def train(model, config, train_set, val_set, test_set, val_set_larger, test_set_
                 loss, output = compute_loss(model, x, y, weights, config)
                 #loss_seg = get_seg_loss(output, seg, seg_criterion, device=device)
 
-                #loss = loss + 0.50 * loss_seg
+                #loss = loss + 0.25 * loss_seg
 
                 train_running_loss_meter.update(loss.item(), n=config.batch_size)
 

@@ -18,6 +18,9 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from ms_modules import MSCBLayer, MSDC
+from models_msunet3d import MSCBLayer3D
+
 def compute_conv_output_shape(h_w, kernel_size, stride, pad, dilation):
     """
     Utility function for computing output of convolutions
@@ -30,18 +33,25 @@ def compute_conv_output_shape(h_w, kernel_size, stride, pad, dilation):
     return h, w
 
 class Conv2DExt(nn.Module):
-    def __init__(self,*args,**kwargs):
+    def __init__(self, in_channels, out_channels, kernel_sizes=[3], expansion_factor=1, dw_parallel=True, add=True, activation='relu6', **kwargs):
         super().__init__()
-        self.conv2d = nn.Conv2d(*args,**kwargs)
+        #self.conv2d = nn.Conv2d(*args,**kwargs)
+        self.conv2d = MSCBLayer(in_channels, out_channels, n=1, stride=1, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+        #self.conv3d = MSCBLayer3D(in_channels, out_channels, n=1, stride=1, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+        #self.conv2d = MSDC(in_channels, out_channels, kernel_sizes, 1, activation, dw_parallel=dw_parallel)   
     def forward(self, input):
         # requried input to have 5 dimensions
         B, T, C, H, W = input.shape
         #input = input.view(-1, C, H, W)
-        y = self.conv2d(input.reshape((B*T, C, H, W)))
+        y = self.conv2d(input.view((B*T, C, H, W)))#reshape((B*T, C, H, W)))
+        #y = self.conv3d(torch.permute(input, (0, 2, 1, 3, 4)))
+        #return torch.permute(y, (0, 2, 1, 3, 4))
+
         #y = self.conv2d(input.view(-1, C, H, W))
-        return torch.reshape(y, [B, T, y.shape[1], y.shape[2], y.shape[3]])
+        return y.view((B, T, y.shape[1], y.shape[2], y.shape[3]))#torch.reshape(y, [B, T, y.shape[1], y.shape[2], y.shape[3]])
+
 class Conv2DExtOrg(nn.Module):
-    def __init__(self,*args,**kwargs):
+    def __init__(self, *args,**kwargs):
         super().__init__()
         self.conv2d = nn.Conv2d(*args,**kwargs)
     def forward(self, input):
@@ -49,9 +59,10 @@ class Conv2DExtOrg(nn.Module):
         B, T, C, H, W = input.shape
         #input = input.view(-1, C, H, W)
         y = self.conv2d(input.reshape((B*T, C, H, W)))
+
         #y = self.conv2d(input.view(-1, C, H, W))
         return torch.reshape(y, [B, T, y.shape[1], y.shape[2], y.shape[3]])
-    
+
 class Conv3DExt(nn.Module):
     def __init__(self,*args,**kwargs):
         super().__init__()
@@ -69,7 +80,7 @@ class CnnSelfAttention(nn.Module):
     Multi-head cnn attention model    
     """
 
-    def __init__(self, H, W, C=1, T=32, output_channels=16, is_causal=False, n_head=8, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), dropout_p=0.1):
+    def __init__(self, H, W, C=1, T=32, output_channels=16, is_causal=False, n_head=8, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), dropout_p=0.1, kernel_sizes=[1,3,5], expansion_factor=2, dw_parallel=True, add=True, activation='relu6'):
         """Define the layers for a cnn self-attention
 
             Input to the attention layer has the size [B, T, C, H, W]
@@ -94,15 +105,19 @@ class CnnSelfAttention(nn.Module):
         self.stride = stride
         self.padding = padding
                         
-        H_prime, W_prime = compute_conv_output_shape((H, W), kernel_size=self.kernel_size, stride=self.stride, pad=self.padding, dilation=1)
+        #H_prime, W_prime = compute_conv_output_shape((H, W), kernel_size=self.kernel_size, stride=self.stride, pad=self.padding, dilation=1)
        
         # key, query, value projections convolution
         # Wk, Wq, Wv
-        self.key = Conv2DExt(C, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
-        self.query = Conv2DExt(C, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
-        self.value = Conv2DExt(C, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
+        self.key = Conv2DExt(C, output_channels, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+            #C, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
+        self.query = Conv2DExt(C, output_channels, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+                               #C, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
+        self.value = Conv2DExt(C, output_channels, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+        #C, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
                 
-        self.output_proj = Conv2DExt(output_channels, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
+        self.output_proj = Conv2DExt(output_channels, output_channels, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+        #output_channels, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
         self.attn_drop = nn.Dropout(dropout_p)
         self.resid_drop = nn.Dropout(dropout_p)
     
@@ -134,11 +149,17 @@ class CnnSelfAttention(nn.Module):
 
         B, nh, T, hc, H_prime, W_prime = k.shape
 
+        #print(q.shape, k.shape)
+
         # Compute attention matrix, use the matrix broadcasing 
         # https://pytorch.org/docs/stable/notes/broadcasting.html
         # (B, nh, T, hc, H', W') x (B, nh, hc, H', W', T) -> (B, nh, T, T)
         att = (q.view(B, nh, T, hc*H_prime*W_prime) @ k.view(B, nh, T, hc*H_prime*W_prime).transpose(-2, -1)) * torch.tensor(1.0 / math.sqrt(hc*H_prime*W_prime))
-
+        #q = q.contiguous().reshape(B, nh, T, hc * H_prime * W_prime)
+        #k = k.contiguous().reshape(B, nh, T, hc * H_prime * W_prime)
+        
+        #att = (q @ k.transpose(-2, -1)) * torch.tensor(1.0 / math.sqrt(hc * H_prime * W_prime))
+    
         #att = (q.view(B, nh, T, hc*H_prime*W_prime) @ k.view(B, nh, T, hc*H_prime*W_prime).transpose(-2, -1))
         
         # if causality is needed, apply the mask
@@ -150,6 +171,8 @@ class CnnSelfAttention(nn.Module):
         
         # (B, nh, T, T) * (B, nh, T, hc, H', W')
         y = att @ v.view(B, nh, T, hc*H_prime*W_prime)
+        #v = v.contiguous().reshape(B, nh, T, hc * H_prime * W_prime)
+        #y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, self.output_channels, H_prime, W_prime)
         y = self.output_proj(y)
         return y
@@ -173,7 +196,12 @@ class CnnTransformer(nn.Module):
                  stride=(1, 1), 
                  padding=(1, 1), 
                  dropout_p=0.1,
-                 with_mixer=True):
+                 with_mixer=True,
+                 kernel_sizes=[1,3,5],
+                 expansion_factor=2, 
+                 dw_parallel=True, 
+                 add=True, 
+                 activation='relu6'):
         """set up cnn transformer
         
            norm_mode: layer - norm along C, H, W; batch - norm along B*T; or instance
@@ -193,14 +221,14 @@ class CnnTransformer(nn.Module):
             self.in1 = nn.InstanceNorm2d(output_channels)
             self.in2 = nn.InstanceNorm2d(output_channels)
             
-        self.attn = CnnSelfAttention(H, W, C=output_channels, T=T, output_channels=output_channels, is_causal=is_causal, n_head=n_head, kernel_size=kernel_size, stride=stride, padding=padding, dropout_p=dropout_p)
+        self.attn = CnnSelfAttention(H, W, C=output_channels, T=T, output_channels=output_channels, is_causal=is_causal, n_head=n_head, kernel_size=kernel_size, stride=stride, padding=padding, dropout_p=dropout_p, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
         self.with_mixer = with_mixer
         if(self.with_mixer):
             self.mlp = nn.Sequential(
-                Conv2DExt(output_channels, 4*output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True),
+                Conv2DExtOrg(output_channels, 4*output_channels, kernel_size=(1,1), stride=stride, padding=(0,0), bias=True),
                 nn.GELU(),
-                Conv2DExt(4*output_channels, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True),
+                Conv2DExtOrg(4*output_channels, output_channels, kernel_size=(1,1), stride=stride, padding=(0,0), bias=True),
                 nn.Dropout(dropout_p),
             )
 
@@ -223,6 +251,8 @@ class CnnTransformer(nn.Module):
         elif(self.norm_mode=="instance"):
             B, T, C, H, W = x.shape
             x1 = torch.reshape(self.in1(torch.reshape(x, (B*T, C, H, W))), x.shape)
+
+            #print(x1.shape)
             x = x + self.attn(x1)
 
             if(self.with_mixer):
@@ -236,12 +266,13 @@ class BlockSet(nn.Module):
     A set of CNNT blocks
     """
 
-    def __init__(self, blocks_per_set, H, W, C=1, T=30, interpolate="none", output_channels=16, is_causal=False, n_head=8, norm_mode='layer', kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), dropout_p=0.1, with_mixer=True):
+    def __init__(self, blocks_per_set, H, W, C=1, T=30, interpolate="none", output_channels=16, is_causal=False, n_head=8, norm_mode='layer', kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), dropout_p=0.1, with_mixer=True, kernel_sizes=[1,3,5], expansion_factor=2, dw_parallel=True, add=True, activation='relu'):
         super().__init__()
 
         H_prime, W_prime = compute_conv_output_shape((H, W), kernel_size=kernel_size, stride=stride, pad=padding, dilation=1)
 
-        self.input_proj = Conv2DExt(C, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
+        self.input_proj = Conv2DExt(C, output_channels, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+        #C, output_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=True)
 
         self.blocks = nn.Sequential(*[CnnTransformer(H=H_prime, 
                                                      W=W_prime, 
@@ -255,7 +286,12 @@ class BlockSet(nn.Module):
                                                      stride=stride, 
                                                      padding=padding, 
                                                      dropout_p=dropout_p, 
-                                                     with_mixer=with_mixer) for _ in range(blocks_per_set)])
+                                                     with_mixer=with_mixer, 
+                                                     kernel_sizes=kernel_sizes, 
+                                                     expansion_factor=expansion_factor, 
+                                                     dw_parallel=dw_parallel, 
+                                                     add=add, 
+                                                     activation=activation) for _ in range(blocks_per_set)])
 
         self.interpolate = interpolate
 
@@ -285,8 +321,8 @@ class CNNTUnet(nn.Module):
     The full CNN_Transformer model for Unet architecture
     """
 
-    def __init__(self, blocks, blocks_per_set, H, W, C_in, T, C_out, n_head=8, norm_mode='layer', kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), dropout_p=0.1, with_mixer=True):
-        """CNNT Unet configuration
+    def __init__(self, blocks, blocks_per_set, H, W, C_in, T, C_out, n_head=8, norm_mode='layer', kernel_size=(3, 3), stride=(1, 1), padding=(1, 1), dropout_p=0.1, with_mixer=True, kernel_sizes=[1,3], expansion_factor=1, dw_parallel=True, add=True, activation='relu6'):
+        """MSCNNT Unet configuration
 
         Args:
             blocks (list): number of output channels for every resolution layers; e.g. [16, 32, 64] means two downsample layers with 16 and 32 channels and the bridge layers have 64 channel outputs
@@ -324,34 +360,35 @@ class CNNTUnet(nn.Module):
         
         if(len(self.blocks)==2): # one downsample layers
            
-            self.down1 = BlockSet(N, H, W, C=C_in, T=T, output_channels=blocks[0], interpolate="down", n_head=n_head, norm_mode=norm_modes[0], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
+            self.down1 = BlockSet(N, H, W, C=C_in, T=T, output_channels=blocks[0], interpolate="down", n_head=n_head, norm_mode=norm_modes[0], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
-            self.up1 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[0], T=T, output_channels=blocks[1], interpolate="up", n_head=n_head, norm_mode=norm_modes[1], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
+            self.up1 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[0], T=T, output_channels=blocks[1], interpolate="up", n_head=n_head, norm_mode=norm_modes[1], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
-            self.final = BlockSet(N, H, W, C=blocks[0]+blocks[1], T=T, output_channels=blocks[1], interpolate="none", n_head=n_head, norm_mode=norm_modes[2], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
+            self.final = BlockSet(N, H, W, C=blocks[0]+blocks[1], T=T, output_channels=blocks[1], interpolate="none", n_head=n_head, norm_mode=norm_modes[2], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
         if(len(self.blocks)==3): # two downsample layers
                 
-            self.down1 = BlockSet(N, H, W, C=C_in, T=T, output_channels=blocks[0], interpolate="down", n_head=n_head, norm_mode=norm_modes[0], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
-            self.down2 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[0], T=T, output_channels=blocks[1], interpolate="down", n_head=n_head, norm_mode=norm_modes[1], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
+            self.down1 = BlockSet(N, H, W, C=C_in, T=T, output_channels=blocks[0], interpolate="down", n_head=n_head, norm_mode=norm_modes[0], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+            self.down2 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[0], T=T, output_channels=blocks[1], interpolate="down", n_head=n_head, norm_mode=norm_modes[1], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
-            self.up1 = BlockSet(N, torch.div(H, 4, rounding_mode='floor'), torch.div(W, 4, rounding_mode='floor'), C=blocks[1], T=T, output_channels=blocks[2], interpolate="up", n_head=n_head, norm_mode=norm_modes[2], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
-            self.up2 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[1]+blocks[2], T=T, output_channels=blocks[2], interpolate="up", n_head=n_head, norm_mode=norm_modes[3], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
+            self.up1 = BlockSet(N, torch.div(H, 4, rounding_mode='floor'), torch.div(W, 4, rounding_mode='floor'), C=blocks[1], T=T, output_channels=blocks[2], interpolate="up", n_head=n_head, norm_mode=norm_modes[2], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+            self.up2 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[1]+blocks[2], T=T, output_channels=blocks[2], interpolate="up", n_head=n_head, norm_mode=norm_modes[3], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
-            self.final = BlockSet(N, H, W, C=blocks[0]+blocks[2], T=T, output_channels=blocks[1], interpolate="none", n_head=n_head, norm_mode=norm_modes[4], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
+            self.final = BlockSet(N, H, W, C=blocks[0]+blocks[2], T=T, output_channels=blocks[1], interpolate="none", n_head=n_head, norm_mode=norm_modes[4], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
         if(len(self.blocks)==4): # three downsample layers
-            self.down1 = BlockSet(N, H, W, C=C_in, T=T, output_channels=blocks[0], interpolate="down", n_head=n_head, norm_mode=norm_modes[0], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
-            self.down2 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[0], T=T, output_channels=blocks[1], interpolate="down", n_head=n_head, norm_mode=norm_modes[1], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
-            self.down3 = BlockSet(N, torch.div(H, 4, rounding_mode='floor'), torch.div(W, 4, rounding_mode='floor'), C=blocks[1], T=T, output_channels=blocks[2], interpolate="down", n_head=n_head, norm_mode=norm_modes[2], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
+            self.down1 = BlockSet(N, H, W, C=C_in, T=T, output_channels=blocks[0], interpolate="down", n_head=n_head, norm_mode=norm_modes[0], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+            self.down2 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[0], T=T, output_channels=blocks[1], interpolate="down", n_head=n_head, norm_mode=norm_modes[1], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+            self.down3 = BlockSet(N, torch.div(H, 4, rounding_mode='floor'), torch.div(W, 4, rounding_mode='floor'), C=blocks[1], T=T, output_channels=blocks[2], interpolate="down", n_head=n_head, norm_mode=norm_modes[2], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
-            self.up1 = BlockSet(N, torch.div(H, 8, rounding_mode='floor'), torch.div(W, 8, rounding_mode='floor'), C=blocks[2], T=T, output_channels=blocks[3], interpolate="up", n_head=n_head, norm_mode=norm_modes[3], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
-            self.up2 = BlockSet(N, torch.div(H, 4, rounding_mode='floor'), torch.div(W, 4, rounding_mode='floor'), C=blocks[2]+blocks[3], T=T, output_channels=blocks[3], interpolate="up", n_head=n_head, norm_mode=norm_modes[4], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
-            self.up3 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[1]+blocks[3], T=T, output_channels=blocks[2], interpolate="up", n_head=n_head, norm_mode=norm_modes[5], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
+            self.up1 = BlockSet(N, torch.div(H, 8, rounding_mode='floor'), torch.div(W, 8, rounding_mode='floor'), C=blocks[2], T=T, output_channels=blocks[3], interpolate="up", n_head=n_head, norm_mode=norm_modes[3], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+            self.up2 = BlockSet(N, torch.div(H, 4, rounding_mode='floor'), torch.div(W, 4, rounding_mode='floor'), C=blocks[2]+blocks[3], T=T, output_channels=blocks[3], interpolate="up", n_head=n_head, norm_mode=norm_modes[4], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+            self.up3 = BlockSet(N, torch.div(H, 2, rounding_mode='floor'), torch.div(W, 2, rounding_mode='floor'), C=blocks[1]+blocks[3], T=T, output_channels=blocks[2], interpolate="up", n_head=n_head, norm_mode=norm_modes[5], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
-            self.final = BlockSet(N, H, W, C=blocks[0]+blocks[2], T=T, output_channels=blocks[1], interpolate="none", n_head=n_head, norm_mode=norm_modes[6], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer)
+            self.final = BlockSet(N, H, W, C=blocks[0]+blocks[2], T=T, output_channels=blocks[1], interpolate="none", n_head=n_head, norm_mode=norm_modes[6], kernel_size=K, stride=S, padding=P, dropout_p=D, with_mixer=with_mixer, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
 
-        self.output_proj = Conv2DExt(blocks[1], C_out, K, padding=P)
+        self.output_proj = Conv2DExt(blocks[1], C_out, kernel_sizes=kernel_sizes, expansion_factor=expansion_factor, dw_parallel=dw_parallel, add=add, activation=activation)
+        #K, padding=P)
 
     def forward(self, x):
 

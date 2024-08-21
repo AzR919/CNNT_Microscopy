@@ -10,9 +10,73 @@ In time seried data the noisy_im is 4D
 """
 
 import numpy as np
+import time
+import os
+import h5py
+
+from concurrent.futures import ThreadPoolExecutor, as_completed, ProcessPoolExecutor
 from torch.utils.data import Dataset
 
 from utils import *
+
+def load_data(hfile, key):
+    # Ensure efficient reading from HDF5 and conversion to float32
+    noisy_data = np.empty(hfile[key + "/noisy_im"].shape, dtype=np.float32)
+    clean_data = np.empty(hfile[key + "/clean_im"].shape, dtype=np.float32)
+
+    hfile[key + "/noisy_im"].read_direct(noisy_data)
+    hfile[key + "/clean_im"].read_direct(clean_data)
+    
+    return noisy_data, clean_data
+
+def process_file(hfile, key, per_scaling, im_value_scale):
+
+    #dtype_img = hfile[key+"/noisy_im"].dtype
+    #dtype_gt = hfile[key+"/clean_im"].dtype
+    #if hfile[key+"/noisy_im"].dtype.itemsize*8 == 8 or hfile[key+"/clean_im"].dtype.itemsize*8 == 8:
+    #    im_value_scale = [0, 256]
+         
+    #noisy_data = np.array(hfile[key+"/noisy_im"]).astype(np.float32) #, dtype=np.float32)
+    #clean_data = np.array(hfile[key+"/clean_im"]).astype(np.float32) #, dtype=np.float32)
+    
+    # Load and convert data to float32 efficiently
+    # Start measuring time
+    #start_time_internal = time.time()
+    # Efficiently read the datasets
+    #noisy_data = hfile[key + "/noisy_im"]
+    #clean_data = hfile[key + "/clean_im"]
+    #noisy_data = np.asarray(hfile[key + "/noisy_im"], dtype=np.float32)
+    #clean_data = np.asarray(hfile[key + "/clean_im"], dtype=np.float32)
+    
+    noisy_data, clean_data = load_data(hfile, key)
+
+    ## End measuring time
+    #end_time_internal = time.time()
+
+    # Calculate and print elapsed time
+    #elapsed_time_internal = end_time_internal - start_time_internal
+    #print(f"Time taken: {elapsed_time_internal} seconds")
+
+    if per_scaling:
+        noisy_data = normalize_image(noisy_data, percentiles=(1.5, 99.5), clip=True)
+        clean_data = normalize_image(clean_data, percentiles=(1.5, 99.5), clip=True)
+    else:
+        noisy_data = normalize_image(noisy_data, values=im_value_scale, clip=True)
+        clean_data = normalize_image(clean_data, values=im_value_scale, clip=True)
+
+    return key, {"noisy_im": noisy_data, "clean_im": clean_data}
+
+def process_file1(data, per_scaling, im_value_scale):
+
+    data = np.asarray(data, dtype=np.float32)
+    #print(data)
+
+    if per_scaling:
+        data = normalize_image(data, percentiles=(1.5, 99.5), clip=True)
+    else:
+        data = normalize_image(data, values=im_value_scale, clip=True)
+
+    return data
 
 class MicroscopyDataset(Dataset):
     """
@@ -21,10 +85,10 @@ class MicroscopyDataset(Dataset):
 
     def __init__(self, h5files, keys,
                     time_cutout=30, cutout_shape=[64, 64],
-                    num_samples_per_file=1, rng=None, test=False,
-                    per_scaling=False, im_value_scale=[0,4096],
+                    num_samples_per_file=1, rng=None, test=False, 
+                    val=False, per_scaling=False, im_value_scale=[0,4096],
                     valu_thres=0.002, area_thres=0.25,
-                    time_scale=0):
+                    time_scale=0, batch_size=10):
         """
         Initilize the denoising dataset
 
@@ -47,6 +111,7 @@ class MicroscopyDataset(Dataset):
 
         self.keys = keys
         self.N_files = len(self.keys)
+        print(self.N_files)
 
         self.time_cutout = time_cutout
         self.cutout_shape = cutout_shape
@@ -54,11 +119,13 @@ class MicroscopyDataset(Dataset):
         self.num_samples_per_file = num_samples_per_file
 
         self.test = test
+        self.val = val
         self.per_scaling = per_scaling
         self.im_value_scale = im_value_scale
         self.valu_thres = valu_thres
         self.area_thres = area_thres
         self.time_scale = time_scale
+        self.batch_size = batch_size
 
         # ------------------------------------------------
 
@@ -73,32 +140,65 @@ class MicroscopyDataset(Dataset):
         else:
             self.rng = rng
 
+        if self.val:
+            self.rng_val = np.random.default_rng(seed=1234)
+            
         for i in range(1, self.N_files):
             self.start_samples[i] = self.end_samples[i-1]
             self.end_samples[i] = num_samples_per_file*len(self.keys[i]) + self.start_samples[i]
 
         self.tiff_dict = {}
+        # Start measuring time
+        start_time = time.time()
+            
+        with ThreadPoolExecutor() as executor: #max_workers=16 #max_workers=os.cpu_count()//2
+            futures = []
+            for i, hfile in enumerate(h5files):
+                self.tiff_dict[i] = {}
+                print(f"start preprocessing {hfile} -->")
+                
+                for j, key in enumerate(keys[i]):
+                    if hfile[key+"/noisy_im"].dtype.itemsize*8 == 8 or hfile[key+"/clean_im"].dtype.itemsize*8 == 8:
+                        self.im_value_scale = [0, 256]
+                    #print(j,'=',key)
+                    
+                    futures.append(executor.submit(process_file, hfile, key, self.per_scaling, self.im_value_scale))
+                    #futures.append(executor.submit(process_file1, hfile[key + "/clean_im"], self.per_scaling, self.im_value_scale))
+
+                print('**************************************************************')
+                #j = 0
+                #results = [future.result() for future in futures]
+                #for j, key in enumerate(keys):
+                #    print(j,'=',key)
+                #    self.tiff_dict[i][key] = {"noisy_im": results[2*j], "clean_im": results[2*j+1]}
+                
+                for future in futures:#as_completed(futures):
+                    try:
+                        key, data_dict = future.result()
+                        #j = j + 1
+                        #print(j,'=',key)
+                        self.tiff_dict[i][key] = data_dict
+                    except Exception as e:
+                        print(f"Error processing future: {e}")
+                print(f"--> finish preprocessing {hfile}")
+
+        # End measuring time
+        end_time = time.time()
+        # Calculate and print elapsed time
+        elapsed_time = end_time - start_time
+        print(f"Time taken: {elapsed_time} seconds")
+
+        '''
         for i, hfile in enumerate(h5files):
             self.tiff_dict[i] = {}
+            print(f"--> start preprocessing {hfile}")
 
-            for key in keys[i]:
-                self.tiff_dict[i][key] = {}
-
-                noisy_data = np.array(hfile[key+"/noisy_im"]).astype(np.float32)
-                clean_data = np.array(hfile[key+"/clean_im"]).astype(np.float32)
-
-                if per_scaling:
-                    noisy_data = normalize_image(noisy_data, percentiles=(1.5, 99.5), clip=True)
-                    clean_data = normalize_image(clean_data, percentiles=(1.5, 99.5), clip=True)
-                else:
-                    noisy_data = normalize_image(noisy_data, values=im_value_scale, clip=True)
-                    clean_data = normalize_image(clean_data, values=im_value_scale, clip=True)
-
-                self.tiff_dict[i][key]["noisy_im"] = noisy_data
-                self.tiff_dict[i][key]["clean_im"] = clean_data
-
-            print(f"--> finish loading {hfile}")
-
+            for j, key in enumerate(keys[i]):
+                print(j,'=',key)
+                key, data_dict = process_file(hfile, key, self.per_scaling, self.im_value_scale)
+                self.tiff_dict[i][key] = data_dict
+        '''
+        
     def load_one_sample(self, h5file, key):
         """
         Loads one sample from the h5file and key pair for regular paired image
@@ -218,14 +318,22 @@ class MicroscopyDataset(Dataset):
         ct = self.time_cutout
         cx, cy = self.cutout_shape
 
-        # initial_s_t = rng.integers(0, t - ct) if t>ct else 0
-        # initial_s_x = rng.integers(0, x - cx) if x>cx else 0
-        # initial_s_y = rng.integers(0, y - cy) if y>cy else 0
+        #initial_s_t = rng.integers(0, t - ct) if t>ct else 0
+        #initial_s_x = rng.integers(0, x - cx) if x>cx else 0
+        #initial_s_y = rng.integers(0, y - cy) if y>cy else 0
 
         s_t = np.random.randint(0, t - ct + 1)
         s_x = np.random.randint(0, x - cx + 1)
         s_y = np.random.randint(0, y - cy + 1)
 
+        if self.val:
+            s_t = self.rng_val.integers(0, t - ct) if t>ct else 0
+            s_x = self.rng_val.integers(0, x - cx) if x>cx else 0
+            s_y = self.rng_val.integers(0, y - cy) if y>cy else 0
+            #print('val idxs: ', [s_t,s_x,s_y])
+        #else:
+            #print('train idxs: ', [s_t,s_x,s_y])
+        
         return s_x, s_y, s_t
 
     def do_cutout(self, data, s_x, s_y, s_t):

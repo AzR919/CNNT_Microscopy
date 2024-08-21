@@ -16,8 +16,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-#from model import *
-from model_ms_cnnt import *
+from model import *
+#from model_ms_cnnt import *
 #from models.models_msunet3d import MSUNet3D
 from enhancement_loss import *
 
